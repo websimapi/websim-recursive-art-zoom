@@ -136,7 +136,18 @@ function App() {
   const [message, setMessage] = useState('');
 
   const { data: commentImages, loading: imagesLoading } = useQuery(
-    room.collection(COLLECTION_NAME).orderBy('created_at', 'desc') // Get newest first, though randomizer ignores order
+    room.query(`
+      SELECT 
+        c.id, 
+        c.user_id, 
+        c.username, 
+        c.original_comment_text, 
+        c.image_prompt, 
+        c.generated_image_url, 
+        c.created_at 
+      FROM public.${COLLECTION_NAME} c 
+      ORDER BY c.created_at DESC
+    `)
   );
 
   const handleCommentSubmit = async (e) => {
@@ -239,4 +250,3 @@ function App() {
 
 const root = createRoot(document.getElementById('root'));
 root.render(<App />);
-
