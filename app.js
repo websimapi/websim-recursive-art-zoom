@@ -140,12 +140,13 @@ function App() {
       SELECT 
         c.id, 
         c.user_id, 
-        c.username, 
+        u.username, 
         c.original_comment_text, 
         c.image_prompt, 
         c.generated_image_url, 
         c.created_at 
-      FROM public.${COLLECTION_NAME} c 
+      FROM public.${COLLECTION_NAME} c
+      JOIN public.user u ON c.user_id = u.id
       ORDER BY c.created_at DESC
     `)
   );
