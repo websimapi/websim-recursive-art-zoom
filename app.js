@@ -2,20 +2,36 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { WebsimSocket, useQuery } from '@websim/use-query';
 
-const COLLECTION_NAME = 'comment_art_v2'; // V2 for potential schema/prompt changes
+const COLLECTION_NAME = 'comment_art_v2';
 
 const room = new WebsimSocket({
   schema: {
     [COLLECTION_NAME]: {
       id: "uuid",
-      user_id: "uuid",
+      user_id: "uuid", 
       original_comment_text: "text",
       image_prompt: "text",
       generated_image_url: "text",
-      // created_at and username are automatic
     },
   },
 });
+
+function extractTextFromDocumentNode(docNode) {
+  if (!docNode || !docNode.children) return '';
+  let text = '';
+  function traverse(nodes) {
+    for (const node of nodes) {
+      if (node.type === 'text' && node.text) {
+        text += node.text + ' ';
+      }
+      if (node.children) {
+        traverse(node.children);
+      }
+    }
+  }
+  traverse(docNode.children);
+  return text.trim();
+}
 
 function ImageZoomer({ images }) {
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -38,8 +54,8 @@ function ImageZoomer({ images }) {
     
     setCurrentIndex(initialCurrent);
     setNextIndex(initialNext);
-    setCurrentImageUrl(images[initialCurrent]?.generated_image_url);
-    setNextImageUrl(images[initialNext]?.generated_image_url);
+    if (images[initialCurrent]) setCurrentImageUrl(images[initialCurrent].generated_image_url);
+    if (images[initialNext]) setNextImageUrl(images[initialNext].generated_image_url);
 
   }, [images]);
 
@@ -59,10 +75,9 @@ function ImageZoomer({ images }) {
         if (images.length > 1) {
           do {
             newNextIdx = Math.floor(Math.random() * images.length);
-          } while (newNextIdx === newCurrentIdx);
+          } while (newNextIdx === newCurrentIdx && images.length > 1); 
         }
 
-        // Update image URLs for the new state
         setCurrentImageUrl(images[newCurrentIdx]?.generated_image_url);
         setNextImageUrl(images[newNextIdx]?.generated_image_url);
         
@@ -74,33 +89,32 @@ function ImageZoomer({ images }) {
           imageContainerRef.current.style.transform = 'scale(1) translate(0,0)';
         }
         
-        // Use rAF to ensure DOM update before making next image visible
         requestAnimationFrame(() => {
             setIsZooming(false);
         });
 
-      }, 3000); // Match transition duration
+      }, 3000); 
 
       return () => clearTimeout(transitionEndTimer);
     };
 
-    const cycleTimer = setTimeout(zoomCycle, 4000); // Time visible before zoom starts
+    const cycleTimer = setTimeout(zoomCycle, 4000); 
     return () => clearTimeout(cycleTimer);
 
   }, [images, currentIndex, nextIndex, isZooming, currentImageUrl]);
 
   if (!images || images.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen text-xl text-gray-400">
-        <p>No art has been generated yet.</p>
-        <p>Enter a comment below to start!</p>
+      <div className="flex flex-col items-center justify-center h-full text-xl text-gray-400">
+        <p>No art has been generated yet from project comments.</p>
+        <p>Or, project comments are still being processed.</p>
       </div>
     );
   }
   
   if (!currentImageUrl) {
     return (
-        <div className="flex items-center justify-center h-screen text-xl text-gray-400">Loading images...</div>
+        <div className="flex items-center justify-center h-full text-xl text-gray-400">Loading images...</div>
     );
   }
 
@@ -112,7 +126,10 @@ function ImageZoomer({ images }) {
           src={currentImageUrl}
           alt="Current art piece"
           className="w-full h-full object-cover"
-          onError={(e) => e.target.style.display='none'} // Hide if image fails to load
+          onError={(e) => {
+            console.warn(`Failed to load current image: ${currentImageUrl}`);
+            e.target.style.display='none';
+          }}
         />
         {nextImageUrl && (
           <img
@@ -121,7 +138,10 @@ function ImageZoomer({ images }) {
             alt="Next art piece, in center"
             className="absolute top-[25%] left-[25%] w-[50%] h-[50%] object-contain border-2 border-white/50 shadow-2xl"
             style={{ display: isZooming ? 'none' : 'block' }}
-            onError={(e) => e.target.style.display='none'} // Hide if image fails to load
+            onError={(e) => {
+                console.warn(`Failed to load next image: ${nextImageUrl}`);
+                e.target.style.display='none';
+            }}
           />
         )}
       </div>
@@ -130,10 +150,7 @@ function ImageZoomer({ images }) {
 }
 
 function App() {
-  const [commentText, setCommentText] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [error, setError] = useState('');
-  const [message, setMessage] = useState('');
+  const [processingStatus, setProcessingStatus] = useState('Initializing...');
 
   const { data: commentImages, loading: imagesLoading } = useQuery(
     room.query(`
@@ -151,95 +168,120 @@ function App() {
     `)
   );
 
-  const handleCommentSubmit = async (e) => {
-    e.preventDefault();
-    if (!commentText.trim()) {
-      setError("Comment cannot be empty.");
-      return;
-    }
-    setIsGenerating(true);
-    setError('');
-    setMessage('');
+  useEffect(() => {
+    const fetchAndProcessProjectComments = async () => {
+      setProcessingStatus('Fetching project comments...');
+      try {
+        const project = await window.websim.getCurrentProject();
+        if (!project || !project.id) {
+          setProcessingStatus('Error: Could not get project information.');
+          setTimeout(() => setProcessingStatus(''), 7000);
+          return;
+        }
 
-    try {
-      const currentUser = await window.websim.getCurrentUser();
-      if (!currentUser) {
-        setError("Could not get user information. Are you logged in?");
-        setIsGenerating(false);
-        return;
+        const response = await fetch(`/api/v1/projects/${project.id}/comments`);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch comments: ${response.statusText} (status ${response.status})`);
+        }
+        const commentsData = await response.json();
+
+        if (!commentsData.comments || !commentsData.comments.data || commentsData.comments.data.length === 0) {
+          setProcessingStatus('No project comments found to process.');
+          setTimeout(() => setProcessingStatus(''), 7000);
+          return;
+        }
+        
+        setProcessingStatus(`Processing ${commentsData.comments.data.length} comments...`);
+        let newArtCreatedCount = 0;
+
+        for (const commentItem of commentsData.comments.data) {
+          const commentObject = commentItem.comment;
+          
+          if (!commentObject || !commentObject.author || !commentObject.author.id || !commentObject.content || commentObject.deleted) {
+            console.warn('Skipping comment due to missing data or deleted status:', commentObject);
+            continue;
+          }
+
+          const originalCommentText = extractTextFromDocumentNode(commentObject.content);
+          const userId = commentObject.author.id;
+
+          if (!originalCommentText.trim()) {
+            console.log('Skipping comment with empty extracted text.');
+            continue;
+          }
+          
+          const existingEntries = await room.collection(COLLECTION_NAME).filter({
+            user_id: userId,
+            original_comment_text: originalCommentText,
+          }).getList();
+
+          if (existingEntries && existingEntries.length > 0) {
+            continue;
+          }
+
+          console.log(`Generating image for comment: "${originalCommentText.substring(0,30)}..." by ${commentObject.author.username || userId}`);
+          const imagePrompt = `White Blank Box in Center. ${originalCommentText}. White Blank Box in Center.`;
+          
+          try {
+              const imageResult = await websim.imageGen({
+                prompt: imagePrompt,
+                aspect_ratio: "1:1",
+              });
+
+              if (!imageResult || !imageResult.url) {
+                console.error("Image generation failed to return a URL for prompt:", imagePrompt);
+                throw new Error("Image generation failed to return a URL.");
+              }
+              
+              await room.collection(COLLECTION_NAME).create({
+                user_id: userId,
+                original_comment_text: originalCommentText,
+                image_prompt: imagePrompt,
+                generated_image_url: imageResult.url,
+              });
+              newArtCreatedCount++;
+              console.log(`Art created for comment by ${commentObject.author.username || userId}`);
+          } catch (imgGenError) {
+              console.error(`Error during image generation or DB save for comment "${originalCommentText.substring(0,30)}...":`, imgGenError);
+          }
+        } 
+
+        if (newArtCreatedCount > 0) {
+            setProcessingStatus(`Processing complete. ${newArtCreatedCount} new art piece(s) created.`);
+        } else {
+            setProcessingStatus('Processing complete. No new art was created (existing comments likely processed).');
+        }
+
+      } catch (err) {
+        console.error("Error processing project comments:", err);
+        setProcessingStatus(`Error processing comments: ${err.message}`);
+      } finally {
+        setTimeout(() => {
+            if (!processingStatus.toLowerCase().includes('error')) {
+                setProcessingStatus('');
+            }
+        }, 7000);
       }
+    };
 
-      // Prevent duplicate entries for the same comment by the same user
-      const existingEntries = await room.collection(COLLECTION_NAME).filter({ 
-        user_id: currentUser.id, 
-        original_comment_text: commentText.trim() 
-      }).getList();
-
-      if (existingEntries && existingEntries.length > 0) {
-        setMessage("You've already created art with this exact comment.");
-        setIsGenerating(false);
-        setCommentText('');
-        return;
-      }
-
-      const imagePrompt = `White Blank Box in Center. ${commentText.trim()}. White Blank Box in Center.`;
-      
-      setMessage("Generating your masterpiece... this can take a moment.");
-      const imageResult = await websim.imageGen({
-        prompt: imagePrompt,
-        aspect_ratio: "1:1", // Ensures square images, helping the "50% box" be square.
-      });
-
-      if (!imageResult || !imageResult.url) {
-        throw new Error("Image generation failed to return a URL.");
-      }
-
-      await room.collection(COLLECTION_NAME).create({
-        user_id: currentUser.id, // user_id will be automatically set, but good to be explicit if needed by schema. Here it's mostly for the duplicate check.
-        original_comment_text: commentText.trim(),
-        image_prompt: imagePrompt,
-        generated_image_url: imageResult.url,
-      });
-
-      setMessage("Art created successfully! It will appear in the zoom cycle.");
-      setCommentText('');
-    } catch (err) {
-      console.error("Error generating or saving art:", err);
-      setError(`Failed to create art: ${err.message}`);
-    } finally {
-      setIsGenerating(false);
-      // Message will clear on next action or after a timeout
-      setTimeout(() => { setMessage(''); setError(''); }, 5000);
-    }
-  };
+    fetchAndProcessProjectComments();
+  }, []); 
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 flex flex-col items-center">
       <header className="w-full p-4 bg-gray-800 shadow-md fixed top-0 left-0 z-50">
-        <h1 className="text-3xl font-bold text-center text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-pink-500 to-red-500">Recursive Comment Art</h1>
-        <form onSubmit={handleCommentSubmit} className="mt-4 flex flex-col sm:flex-row items-center justify-center gap-2">
-          <input
-            type="text"
-            value={commentText}
-            onChange={(e) => setCommentText(e.target.value)}
-            placeholder="Enter your art prompt idea"
-            className="p-2 rounded-md bg-gray-700 text-white border border-gray-600 focus:ring-2 focus:ring-purple-500 focus:border-transparent flex-grow sm:max-w-md"
-            disabled={isGenerating}
-          />
-          <button
-            type="submit"
-            className="px-6 py-2 bg-purple-600 hover:bg-purple-700 rounded-md text-white font-semibold transition-colors duration-150 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={isGenerating}
-          >
-            {isGenerating ? 'Generating...' : 'Create Art'}
-          </button>
-        </form>
-        {message && <p className="text-center mt-2 text-green-400">{message}</p>}
-        {error && <p className="text-center mt-2 text-red-400">{error}</p>}
+        <h1 className="text-3xl font-bold text-center text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-pink-500 to-red-500">
+          Recursive Comment Art
+        </h1>
+        {processingStatus && (
+          <p className={`text-center mt-2 ${processingStatus.toLowerCase().includes('error') ? 'text-red-400' : 'text-green-400'}`}>
+            {processingStatus}
+          </p>
+        )}
       </header>
       
-      <main className="w-full h-screen pt-[150px] sm:pt-[120px]"> {/* Adjust padding top to clear fixed header */}
-        {imagesLoading ? (
+      <main className="w-full h-screen pt-[80px] sm:pt-[70px]"> 
+        {imagesLoading && !commentImages ? ( 
           <div className="flex items-center justify-center h-full text-xl">Loading art gallery...</div>
         ) : (
           <ImageZoomer images={commentImages || []} />
